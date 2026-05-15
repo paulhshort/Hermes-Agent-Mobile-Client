@@ -180,6 +180,17 @@ chmod +x setup-vps-dashboard.sh
 9. Known mobile caveat: Android soft-keyboard input is adapted in the APK.
    Terminal scroll inside WebView may still vary by device/WebView version.
 
+## Known gaps
+
+- Terminal scroll inside the embedded Hermes TUI may still vary by device and
+  WebView version.
+- Hermes dashboard plugin pages are inherited from the upstream dashboard, but
+  this Android client has not validated every plugin page yet.
+- Under the dashboard `Plugins` section, `Kanban` and `Example` are currently
+  unvalidated/unknown in this mobile client. They may appear because the stock
+  Hermes dashboard exposes them, but they should not be treated as confirmed
+  mobile-supported features yet.
+
 ## Build APK
 
 ```bash
@@ -206,3 +217,5 @@ must use the same key or Android will reject them as updates.
 - Terminal scroll on Android WebView is still an active compatibility area. The
   current client attempts wheel and Shift+Arrow event bridging, but contributors
   should verify behavior on real devices before treating it as complete.
+- Plugin pages such as `Kanban` and `Example` need explicit mobile validation
+  before they are documented as working.
