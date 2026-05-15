@@ -27,15 +27,17 @@ iOS is not implemented in this repo.
 - `android/` - Android Studio / Gradle project
 - `apk/hermes-agent-mobile-client-release.apk` - signed APK artifact
 - `apk/hermes-agent-mobile-client-debug.apk` - debug APK artifact
+- `demo/hermes-agent-mobile-demo.gif` - README-compatible inline demo
 - `demo/hermes-agent-mobile-demo.mp4` - trimmed app demo recording
 - `scripts/run-emulator.sh` - helper script for emulator startup
 - `scripts/setup-vps-dashboard.sh` - one-shot VPS dashboard setup
 
 ## Demo
 
-<video src="demo/hermes-agent-mobile-demo.mp4" controls width="360"></video>
+![Hermes Agent Mobile demo](demo/hermes-agent-mobile-demo.gif)
 
-If the embedded player does not render, open:
+The README embeds a GIF because GitHub renders it reliably inline. The trimmed
+MP4 is also kept for direct playback/download:
 
 `demo/hermes-agent-mobile-demo.mp4`
 
