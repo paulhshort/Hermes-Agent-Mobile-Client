@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.webkit.ConsoleMessage
@@ -50,7 +51,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 private const val LOG_TAG = "HermesWebView"
 private const val PREFS_NAME = "hermes_mobile_client"
 private const val PREF_LAST_DASHBOARD_BASE = "last_dashboard_base"
+private const val PREF_TEXT_ZOOM = "text_zoom"
 private const val STATE_WEBVIEW = "state_webview"
+private const val DEFAULT_TEXT_ZOOM = 90
 
 class MainActivity : ComponentActivity() {
     private lateinit var webView: HermesWebView
@@ -89,14 +92,14 @@ class MainActivity : ComponentActivity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
-            settings.cacheMode = WebSettings.LOAD_NO_CACHE
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = false
             settings.setSupportZoom(false)
             settings.builtInZoomControls = false
             settings.displayZoomControls = false
-            settings.textZoom = 90
+            settings.textZoom = getSavedTextZoom()
             settings.userAgentString = "${settings.userAgentString} HermesAgentMobile/0.1"
 
             webChromeClient = object : WebChromeClient() {
@@ -178,7 +181,12 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        renderConnectionHome()
+        val lastBase = getSavedDashboardBase()
+        if (!lastBase.isNullOrBlank()) {
+            loadDashboardBase(lastBase, persist = false)
+        } else {
+            renderConnectionHome()
+        }
     }
 
     override fun onDestroy() {
@@ -215,8 +223,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connectSavedOrManual() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val lastBase = prefs.getString(PREF_LAST_DASHBOARD_BASE, null)?.trim()?.removeSuffix("/")
+        val lastBase = getSavedDashboardBase()
         if (!lastBase.isNullOrBlank()) {
             loadDashboardBase(lastBase, persist = false)
         } else {
@@ -228,8 +235,7 @@ class MainActivity : ComponentActivity() {
         renderStatusPage("Scanning local network for Hermes dashboard...", attemptedBases.toList())
         startupExecutor.execute {
             Log.d(LOG_TAG, "bootstrap: start")
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val lastBase = prefs.getString(PREF_LAST_DASHBOARD_BASE, null)?.trim()?.removeSuffix("/")
+            val lastBase = getSavedDashboardBase()
             if (!lastBase.isNullOrBlank() && isHermesDashboardBase(lastBase)) {
                 Log.d(LOG_TAG, "bootstrap: using last base $lastBase")
                 loadDashboardBase(lastBase, persist = false)
@@ -252,16 +258,44 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadDashboardBase(base: String, persist: Boolean) {
+        val normalizedBase = base.removeSuffix("/")
         if (persist) {
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putString(PREF_LAST_DASHBOARD_BASE, base)
+                .putString(PREF_LAST_DASHBOARD_BASE, normalizedBase)
                 .apply()
         }
         showingConnectionHub = false
-        val chatUrl = "${base.removeSuffix("/")}/chat"
+        val chatUrl = "$normalizedBase/chat"
         renderStatusPage("Opening Hermes dashboard...", listOf(chatUrl))
-        mainHandler.post { webView.loadUrl(chatUrl) }
+        startupExecutor.execute {
+            warmupDashboard(normalizedBase)
+            mainHandler.post { webView.loadUrl(chatUrl) }
+        }
+    }
+
+    private fun warmupDashboard(base: String) {
+        runCatching {
+            val conn = (URL("$base/api/status").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 800
+                readTimeout = 800
+                instanceFollowRedirects = true
+            }
+            conn.inputStream.use { it.readNBytes(32) }
+            conn.disconnect()
+        }
+    }
+
+    private fun getSavedDashboardBase(): String? {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(PREF_LAST_DASHBOARD_BASE, null)?.trim()?.removeSuffix("/")
+    }
+
+    private fun getSavedTextZoom(): Int {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(PREF_TEXT_ZOOM, DEFAULT_TEXT_ZOOM)
+            .coerceIn(60, 160)
     }
 
     private fun discoverHermesDashboardBases(): List<String> {
@@ -543,6 +577,7 @@ class MainActivity : ComponentActivity() {
             "saved" -> connectSavedOrManual()
             "script" -> showVpsScriptDialog()
             "menu" -> showHamburgerMenu()
+            "textsize" -> showTextSizeDialog()
         }
         return true
     }
@@ -566,6 +601,53 @@ class MainActivity : ComponentActivity() {
         renderConnectionHome()
     }
 
+    private fun showTextSizeDialog() {
+        val current = getSavedTextZoom()
+        val title = TextView(this).apply {
+            text = "Text Size: $current%"
+            setTextColor(Color.parseColor("#ffe6cb"))
+            textSize = 14f
+            setPadding(0, 0, 0, 16)
+        }
+        val slider = SeekBar(this).apply {
+            max = 100
+            progress = current - 60
+        }
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#041c1c"))
+            setPadding(36, 28, 36, 20)
+            addView(title)
+            addView(slider)
+        }
+
+        val applyZoom = { zoom: Int ->
+            webView.settings.textZoom = zoom
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(PREF_TEXT_ZOOM, zoom)
+                .apply()
+        }
+
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val zoom = (progress + 60).coerceIn(60, 160)
+                title.text = "Text Size: ${zoom}%"
+                applyZoom(zoom)
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        AlertDialog.Builder(this)
+            .setTitle("Terminal Text Size")
+            .setView(wrapper)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
     private fun injectMobileChrome(view: WebView) {
         if (showingConnectionHub) return
         view.evaluateJavascript(
@@ -579,7 +661,9 @@ class MainActivity : ComponentActivity() {
                 'body,*{overscroll-behavior:auto;}',
                 'input,textarea,select{font-size:16px!important;}',
                 '#hermes-mobile-power{width:34px;height:34px;border-radius:999px;border:1px solid rgba(255,230,203,.45);background:rgba(4,28,28,.25);color:#ffe6cb;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);font-size:17px;line-height:1;box-sizing:border-box;}',
-                '#hermes-mobile-power:hover,#hermes-mobile-power:active{background:rgba(255,215,94,.12);border-color:rgba(255,215,94,.75);color:#ffd75e;}'
+                '#hermes-mobile-power:hover,#hermes-mobile-power:active{background:rgba(255,215,94,.12);border-color:rgba(255,215,94,.75);color:#ffd75e;}',
+                '#hermes-mobile-textsize{width:34px;height:34px;border-radius:999px;border:1px solid rgba(255,230,203,.45);background:rgba(4,28,28,.25);color:#ffe6cb;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);font-size:15px;line-height:1;box-sizing:border-box;}',
+                '#hermes-mobile-textsize:hover,#hermes-mobile-textsize:active{background:rgba(255,215,94,.12);border-color:rgba(255,215,94,.75);color:#ffd75e;}'
               ].join('\n');
               document.head.appendChild(style);
 
@@ -590,6 +674,12 @@ class MainActivity : ComponentActivity() {
               b.setAttribute('aria-label','Power');
               b.setAttribute('title','Power');
               b.innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>';
+              var z=document.createElement('a');
+              z.id='hermes-mobile-textsize';
+              z.href='hermes://textsize';
+              z.setAttribute('aria-label','Text Size');
+              z.setAttribute('title','Text Size');
+              z.textContent='A';
 
               var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
               var brandText=null;
@@ -611,12 +701,22 @@ class MainActivity : ComponentActivity() {
                 host.style.alignItems='center';
                 host.style.justifyContent='space-between';
                 host.style.gap='10px';
-                host.appendChild(b);
+                var controls=document.createElement('div');
+                controls.style.display='inline-flex';
+                controls.style.gap='8px';
+                controls.appendChild(z);
+                controls.appendChild(b);
+                host.appendChild(controls);
               }else{
                 b.style.position='fixed';
                 b.style.top='12px';
                 b.style.left='12px';
                 b.style.zIndex='99999';
+                z.style.position='fixed';
+                z.style.top='12px';
+                z.style.left='54px';
+                z.style.zIndex='99999';
+                document.body.appendChild(z);
                 document.body.appendChild(b);
               }
             })();
