@@ -1,4 +1,4 @@
-# Hermes Agent Mobile Client (Android)
+# Hermes Agent Mobile Client (for Android, iOS - WIP)
 
 
 ![Hermes Agent Mobile demo](demo/hermes-agent-mobile-demo.gif)
