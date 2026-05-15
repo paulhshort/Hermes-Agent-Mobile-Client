@@ -1,5 +1,8 @@
 # Hermes Agent Mobile Client (Android)
 
+
+![Hermes Agent Mobile demo](demo/hermes-agent-mobile-demo.gif)
+
 This folder is an open-source snapshot of the current project state: a thin
 Android WebView client that loads a running Hermes dashboard.
 
@@ -31,15 +34,6 @@ iOS is not implemented in this repo.
 - `demo/hermes-agent-mobile-demo.mp4` - trimmed app demo recording
 - `scripts/run-emulator.sh` - helper script for emulator startup
 - `scripts/setup-vps-dashboard.sh` - one-shot VPS dashboard setup
-
-## Demo
-
-![Hermes Agent Mobile demo](demo/hermes-agent-mobile-demo.gif)
-
-The README embeds a GIF because GitHub renders it reliably inline. The trimmed
-MP4 is also kept for direct playback/download:
-
-`demo/hermes-agent-mobile-demo.mp4`
 
 ## Download APK
 
