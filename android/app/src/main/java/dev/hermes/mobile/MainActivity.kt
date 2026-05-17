@@ -26,8 +26,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.net.nsd.NsdManager
-import android.net.nsd.NsdServiceInfo
 import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -38,23 +36,26 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import java.net.HttpURLConnection
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.net.URI
 import java.net.URL
-import java.util.Collections
+import java.net.URLEncoder
+import java.net.URLDecoder
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 private const val LOG_TAG = "HermesWebView"
 private const val PREFS_NAME = "hermes_mobile_client"
 private const val PREF_LAST_DASHBOARD_BASE = "last_dashboard_base"
+private const val PREF_TAILNET_SUFFIX = "tailnet_suffix"
+private const val PREF_DISCOVERY_HOSTS = "discovery_hosts"
+private const val PREF_DISCOVERY_PORTS = "discovery_ports"
+private const val PREF_DISCOVERY_IPV4 = "discovery_ipv4"
 private const val PREF_TEXT_ZOOM = "text_zoom"
 private const val STATE_WEBVIEW = "state_webview"
 private const val DEFAULT_TEXT_ZOOM = 90
+private const val DEFAULT_DISCOVERY_HOSTS = "devil,dev01,g4-dev,g4-dt-069,g4dev,g4,hermes,dev"
+private const val DEFAULT_DISCOVERY_PORTS = "9119,9120,9121,9122,9123"
+private const val DEFAULT_DISCOVERY_IPV4 = ""
 
 object EndpointPolicy {
     fun normalizeDashboardBase(raw: String): String {
@@ -88,6 +89,77 @@ object EndpointPolicy {
         val octets = host.split(".").map { it.toIntOrNull() ?: return false }
         if (octets.size != 4 || octets.any { it !in 0..255 }) return false
         // Tailscale CGNAT range: 100.64.0.0/10 through 100.127.255.255.
+        return octets[0] == 100 && octets[1] in 64..127
+    }
+}
+
+object DiscoveryPolicy {
+    fun generateDashboardCandidates(
+        tailnetSuffix: String,
+        hostNames: String,
+        ports: String,
+        explicitIpv4Addresses: String,
+        savedBase: String?,
+    ): List<String> {
+        val candidates = linkedSetOf<String>()
+        val normalizedSaved = savedBase?.let { EndpointPolicy.normalizeDashboardBase(it) }.orEmpty()
+        if (EndpointPolicy.isAllowedDashboardBase(normalizedSaved)) candidates += normalizedSaved
+
+        val parsedPorts = parsePorts(ports)
+        val suffix = normalizeTailnetSuffix(tailnetSuffix)
+        if (suffix.isNotBlank()) {
+            parseCsv(hostNames).forEach { host ->
+                parsedPorts.forEach { port ->
+                    val base = "http://$host.$suffix:$port"
+                    if (EndpointPolicy.isAllowedDashboardBase(base)) candidates += base
+                }
+            }
+        }
+
+        parseTailscaleIpv4Addresses(explicitIpv4Addresses)
+            .forEach { host ->
+                parsedPorts.forEach { port ->
+                    candidates += "http://$host:$port"
+                }
+            }
+
+        return candidates.toList()
+    }
+
+    fun parseHosts(raw: String): String = parseCsv(raw).joinToString(",")
+
+    fun parsePorts(raw: String): List<Int> {
+        val parsed = parseCsv(raw)
+            .mapNotNull { it.toIntOrNull() }
+            .filter { it in 1..65535 }
+            .distinct()
+        return parsed.ifEmpty { listOf(9119) }
+    }
+
+    fun parseTailscaleIpv4Addresses(raw: String): List<String> = parseCsv(raw)
+        .filter { isTailscaleIpv4(it) }
+        .distinct()
+
+    fun normalizeTailnetSuffix(raw: String): String {
+        return raw.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .trim('.')
+            .lowercase()
+            .takeIf { it.endsWith(".ts.net") && it != "ts.net" }
+            .orEmpty()
+    }
+
+    private fun parseCsv(raw: String): List<String> = raw
+        .split(',', '\n', ';', ' ')
+        .map { it.trim().lowercase().trim('.') }
+        .filter { it.isNotBlank() }
+        .distinct()
+
+    private fun isTailscaleIpv4(host: String): Boolean {
+        val octets = host.split(".").map { it.toIntOrNull() ?: return false }
+        if (octets.size != 4 || octets.any { it !in 0..255 }) return false
         return octets[0] == 100 && octets[1] in 64..127
     }
 }
@@ -262,6 +334,8 @@ class MainActivity : ComponentActivity() {
                   <a href="hermes://menu" style="text-decoration:none;color:#ffe6cb;background:#0d1d18;border:1px solid #21362d;padding:8px 12px">☰</a>
                 </div>
                 <div style="font-size:13px;color:#89917e;margin-bottom:18px">Choose a trusted Tailscale dashboard endpoint</div>
+                <a href="hermes://discover" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Tailnet Auto Discover</a>
+                <a href="hermes://configure-discovery" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Configure Tailnet Discovery</a>
                 <a href="hermes://manual" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Tailscale Endpoint (Enter URL)</a>
                 <a href="hermes://saved" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Use Saved Endpoint</a>
                 <a href="hermes://script" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Show Tailscale Setup Notes</a>
@@ -281,8 +355,34 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun bootstrapDashboardConnection() {
-        renderStatusPage("Auto-discovery is disabled in the hardened Tailscale build. Enter a trusted .ts.net or 100.64.0.0/10 endpoint manually.", attemptedBases.toList())
-        renderConnectionHome()
+        val candidates = DiscoveryPolicy.generateDashboardCandidates(
+            tailnetSuffix = getDiscoveryTailnetSuffix(),
+            hostNames = getDiscoveryHosts(),
+            ports = getDiscoveryPorts(),
+            explicitIpv4Addresses = getDiscoveryIpv4Addresses(),
+            savedBase = getSavedDashboardBase(),
+        )
+        attemptedBases.clear()
+        attemptedBases.addAll(candidates)
+        if (candidates.isEmpty()) {
+            renderStatusPage("No Tailnet discovery candidates configured yet. Add your tailnet suffix and Hermes hostnames first.", emptyList())
+            promptForDiscoveryConfig()
+            return
+        }
+        renderStatusPage("Scanning trusted Tailnet candidates for Hermes dashboards...", candidates)
+        startupExecutor.execute {
+            val verified = candidates.filter { isHermesDashboardBase(it) }
+            mainHandler.post {
+                when (verified.size) {
+                    0 -> {
+                        renderStatusPage("No Hermes dashboards found on configured Tailnet candidates. Check Tailscale ACLs, dashboard ports, and hostnames.", candidates)
+                        renderConnectionHome()
+                    }
+                    1 -> loadDashboardBase(verified.first(), persist = true)
+                    else -> renderDiscoveredDashboards(verified)
+                }
+            }
+        }
     }
 
     private fun loadDashboardBase(base: String, persist: Boolean) {
@@ -328,106 +428,44 @@ class MainActivity : ComponentActivity() {
         return prefs.getString(PREF_LAST_DASHBOARD_BASE, null)?.trim()?.removeSuffix("/")
     }
 
+    private fun getDiscoveryTailnetSuffix(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_TAILNET_SUFFIX, "")
+            .orEmpty()
+    }
+
+    private fun getDiscoveryHosts(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_DISCOVERY_HOSTS, DEFAULT_DISCOVERY_HOSTS)
+            .orEmpty()
+    }
+
+    private fun getDiscoveryPorts(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_DISCOVERY_PORTS, DEFAULT_DISCOVERY_PORTS)
+            .orEmpty()
+    }
+
+    private fun getDiscoveryIpv4Addresses(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_DISCOVERY_IPV4, DEFAULT_DISCOVERY_IPV4)
+            .orEmpty()
+    }
+
+    private fun saveDiscoveryConfig(tailnetSuffix: String, hosts: String, ports: String, ipv4Addresses: String) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_TAILNET_SUFFIX, DiscoveryPolicy.normalizeTailnetSuffix(tailnetSuffix))
+            .putString(PREF_DISCOVERY_HOSTS, DiscoveryPolicy.parseHosts(hosts).ifBlank { DEFAULT_DISCOVERY_HOSTS })
+            .putString(PREF_DISCOVERY_PORTS, DiscoveryPolicy.parsePorts(ports).joinToString(","))
+            .putString(PREF_DISCOVERY_IPV4, DiscoveryPolicy.parseTailscaleIpv4Addresses(ipv4Addresses).joinToString(","))
+            .apply()
+    }
+
     private fun getSavedTextZoom(): Int {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getInt(PREF_TEXT_ZOOM, DEFAULT_TEXT_ZOOM)
             .coerceIn(60, 160)
-    }
-
-    private fun discoverHermesDashboardBases(): List<String> {
-        val candidates = linkedSetOf<String>()
-
-        discoverViaMdns().forEach { host ->
-            candidates += "http://$host:9119"
-        }
-        discoverViaLanProbe().forEach { host ->
-            candidates += "http://$host:9119"
-        }
-
-        val verified = mutableListOf<String>()
-        for (base in candidates) {
-            attemptedBases += base
-            if (isHermesDashboardBase(base)) {
-                verified += base
-            }
-        }
-        Log.d(LOG_TAG, "Discovery verified ${verified.size} Hermes dashboard endpoints")
-        return verified
-    }
-
-    private fun discoverViaMdns(): Set<String> {
-        val nsd = getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return emptySet()
-        val hosts = Collections.synchronizedSet(mutableSetOf<String>())
-        val done = CountDownLatch(1)
-        val resolvePending = Collections.synchronizedList(mutableListOf<CountDownLatch>())
-
-        val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String) {}
-            override fun onServiceLost(service: NsdServiceInfo) {}
-            override fun onDiscoveryStopped(serviceType: String) {
-                done.countDown()
-            }
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                done.countDown()
-            }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-                done.countDown()
-            }
-            override fun onServiceFound(service: NsdServiceInfo) {
-                val name = service.serviceName.lowercase()
-                if (!name.contains("hermes")) return
-                val wait = CountDownLatch(1)
-                resolvePending += wait
-                nsd.resolveService(service, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                        wait.countDown()
-                    }
-                    override fun onServiceResolved(resolved: NsdServiceInfo) {
-                        val host = resolved.host?.hostAddress
-                        if (!host.isNullOrBlank()) hosts += host
-                        wait.countDown()
-                    }
-                })
-            }
-        }
-
-        return try {
-            nsd.discoverServices("_http._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
-            done.await(3500, TimeUnit.MILLISECONDS)
-            runCatching { nsd.stopServiceDiscovery(listener) }
-            resolvePending.forEach { it.await(1200, TimeUnit.MILLISECONDS) }
-            hosts
-        } catch (_: Exception) {
-            emptySet()
-        }
-    }
-
-    private fun discoverViaLanProbe(): Set<String> {
-        val localIp = localIpv4Address() ?: return emptySet()
-        val parts = localIp.split(".")
-        if (parts.size != 4) return emptySet()
-        val prefix = "${parts[0]}.${parts[1]}.${parts[2]}."
-        val found = Collections.synchronizedSet(mutableSetOf<String>())
-        val pool = Executors.newFixedThreadPool(32)
-        val stop = AtomicBoolean(false)
-        try {
-            for (i in 1..254) {
-                pool.execute {
-                    if (stop.get()) return@execute
-                    val host = "$prefix$i"
-                    if (isHermesDashboardBase("http://$host:9119")) {
-                        found += host
-                        stop.set(true)
-                    }
-                }
-            }
-            pool.shutdown()
-            val finished = pool.awaitTermination(8, TimeUnit.SECONDS)
-            if (!finished) pool.shutdownNow()
-        } catch (_: Exception) {
-            pool.shutdownNow()
-        }
-        return found
     }
 
     private fun isHermesDashboardBase(baseUrl: String): Boolean {
@@ -468,6 +506,98 @@ class MainActivity : ComponentActivity() {
             </body></html>
         """.trimIndent()
         mainHandler.post { webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) }
+    }
+
+    private fun renderDiscoveredDashboards(verified: List<String>) {
+        val links = verified.joinToString("") { base ->
+            val encoded = URLEncoder.encode(base, "UTF-8")
+            "<a href=\"hermes://connect?base=$encoded\" style=\"display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:14px;border:1px solid #21362d;margin-bottom:10px\">${htmlEscape(base)}</a>"
+        }
+        val html = """
+            <html><body style="margin:0;background:#041c1c;color:#ffe6cb;font-family:monospace">
+              <div style="padding:28px">
+                <div style="font-size:22px;letter-spacing:1px;margin-bottom:8px">DISCOVERED HERMES DASHBOARDS</div>
+                <div style="font-size:13px;color:#89917e;margin-bottom:18px">Choose a trusted Tailnet dashboard</div>
+                $links
+                <a href="hermes://configure-discovery" style="display:block;text-decoration:none;background:#111;color:#ffe6cb;padding:14px;border:1px solid #21362d;margin-top:18px">Configure Discovery</a>
+              </div>
+            </body></html>
+        """.trimIndent()
+        webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+    }
+
+    private fun promptForDiscoveryConfig() {
+        mainHandler.post {
+            val wrapper = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.parseColor("#041c1c"))
+                setPadding(36, 28, 36, 20)
+            }
+            val suffix = EditText(this).apply {
+                hint = "example.ts.net"
+                setText(getDiscoveryTailnetSuffix())
+                setTextColor(Color.parseColor("#ffe6cb"))
+                setHintTextColor(Color.parseColor("#89917e"))
+                setBackgroundColor(Color.parseColor("#0d1d18"))
+                setPadding(28, 18, 28, 18)
+            }
+            val hosts = EditText(this).apply {
+                hint = "devil,g4-dev,other-host"
+                setText(getDiscoveryHosts())
+                setTextColor(Color.parseColor("#ffe6cb"))
+                setHintTextColor(Color.parseColor("#89917e"))
+                setBackgroundColor(Color.parseColor("#0d1d18"))
+                setPadding(28, 18, 28, 18)
+            }
+            val ports = EditText(this).apply {
+                hint = "9119,9120,9121"
+                setText(getDiscoveryPorts())
+                setTextColor(Color.parseColor("#ffe6cb"))
+                setHintTextColor(Color.parseColor("#89917e"))
+                setBackgroundColor(Color.parseColor("#0d1d18"))
+                setPadding(28, 18, 28, 18)
+            }
+            val ipv4 = EditText(this).apply {
+                hint = "100.x.y.z,100.a.b.c"
+                setText(getDiscoveryIpv4Addresses())
+                setTextColor(Color.parseColor("#ffe6cb"))
+                setHintTextColor(Color.parseColor("#89917e"))
+                setBackgroundColor(Color.parseColor("#0d1d18"))
+                setPadding(28, 18, 28, 18)
+            }
+            val help = TextView(this).apply {
+                text = "Tailnet suffix must be your specific <tailnet>.ts.net, not bare ts.net. Hostnames are MagicDNS machine names. Ports cover multiple Hermes deployments per host. Optional IPv4 entries must be explicit Tailscale 100.64.0.0/10 addresses; the app never scans arbitrary LANs or CGNAT ranges."
+                setTextColor(Color.parseColor("#89917e"))
+                textSize = 12f
+                setPadding(0, 0, 0, 14)
+            }
+            fun label(text: String) = TextView(this).apply {
+                this.text = text
+                setTextColor(Color.parseColor("#ffe6cb"))
+                textSize = 13f
+                setPadding(0, 14, 0, 6)
+            }
+            wrapper.addView(help)
+            wrapper.addView(label("Tailnet suffix")); wrapper.addView(suffix)
+            wrapper.addView(label("Hermes hostnames")); wrapper.addView(hosts)
+            wrapper.addView(label("Dashboard ports")); wrapper.addView(ports)
+            wrapper.addView(label("Explicit Tailscale IPv4 addresses (optional)")); wrapper.addView(ipv4)
+
+            AlertDialog.Builder(this)
+                .setTitle("Tailnet Discovery")
+                .setView(wrapper)
+                .setPositiveButton("Save & Scan") { _, _ ->
+                    saveDiscoveryConfig(
+                        tailnetSuffix = suffix.text?.toString().orEmpty(),
+                        hosts = hosts.text?.toString().orEmpty(),
+                        ports = ports.text?.toString().orEmpty(),
+                        ipv4Addresses = ipv4.text?.toString().orEmpty(),
+                    )
+                    bootstrapDashboardConnection()
+                }
+                .setNegativeButton("Back") { _, _ -> renderConnectionHome() }
+                .show()
+        }
     }
 
     private fun promptForManualEndpoint() {
@@ -572,6 +702,11 @@ class MainActivity : ComponentActivity() {
         val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
         when (host) {
             "discover" -> bootstrapDashboardConnection()
+            "configure-discovery" -> promptForDiscoveryConfig()
+            "connect" -> {
+                val base = runCatching { URLDecoder.decode(Uri.parse(url).getQueryParameter("base").orEmpty(), "UTF-8") }.getOrDefault("")
+                if (base.isNotBlank()) loadDashboardBase(base, persist = true)
+            }
             "manual" -> promptForManualEndpoint()
             "saved" -> connectSavedOrManual()
             "script" -> showVpsScriptDialog()
@@ -1012,25 +1147,6 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun localIpv4Address(): String? {
-        return try {
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
-            for (iface in interfaces) {
-                if (!iface.isUp || iface.isLoopback) continue
-                val name = iface.name.lowercase()
-                if (!name.startsWith("wlan") && !name.startsWith("eth") && !name.startsWith("en")) continue
-                val addresses = iface.inetAddresses
-                for (addr in addresses) {
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        return addr.hostAddress
-                    }
-                }
-            }
-            null
-        } catch (_: Exception) {
-            null
-        }
-    }
 }
 
 class HermesWebView(context: Context) : WebView(context) {
