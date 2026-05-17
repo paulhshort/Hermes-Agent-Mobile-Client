@@ -40,6 +40,7 @@ import android.view.inputmethod.InputConnection
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.URI
 import java.net.URL
 import java.util.Collections
 import java.util.concurrent.CopyOnWriteArrayList
@@ -54,6 +55,42 @@ private const val PREF_LAST_DASHBOARD_BASE = "last_dashboard_base"
 private const val PREF_TEXT_ZOOM = "text_zoom"
 private const val STATE_WEBVIEW = "state_webview"
 private const val DEFAULT_TEXT_ZOOM = 90
+
+object EndpointPolicy {
+    fun normalizeDashboardBase(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            trimmed
+        } else {
+            "http://$trimmed"
+        }
+        return withScheme
+            .removeSuffix("/")
+            .removeSuffix("/chat")
+            .removeSuffix("/")
+    }
+
+    fun isAllowedDashboardBase(baseUrl: String): Boolean {
+        val normalized = normalizeDashboardBase(baseUrl)
+        if (normalized.isBlank()) return false
+        val uri = runCatching { URI(normalized) }.getOrNull() ?: return false
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme != "http" && scheme != "https") return false
+        if (!uri.userInfo.isNullOrBlank()) return false
+        val host = uri.host?.trim()?.lowercase()?.trimEnd('.') ?: return false
+        return isTailscaleIpv4(host) || isTailscaleMagicDns(host)
+    }
+
+    private fun isTailscaleMagicDns(host: String): Boolean = host.endsWith(".ts.net")
+
+    private fun isTailscaleIpv4(host: String): Boolean {
+        val octets = host.split(".").map { it.toIntOrNull() ?: return false }
+        if (octets.size != 4 || octets.any { it !in 0..255 }) return false
+        // Tailscale CGNAT range: 100.64.0.0/10 through 100.127.255.255.
+        return octets[0] == 100 && octets[1] in 64..127
+    }
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var webView: HermesWebView
@@ -89,7 +126,7 @@ class MainActivity : ComponentActivity() {
             settings.domStorageEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
             settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = false
             settings.setSupportZoom(false)
@@ -106,12 +143,21 @@ class MainActivity : ComponentActivity() {
 
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
-                    return handleInternalUrl(url)
+                    return handleNavigationUrl(url, isMainFrame = true)
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val uri = request.url ?: return false
-                    return handleInternalUrl(uri.toString())
+                    return handleNavigationUrl(uri.toString(), isMainFrame = request.isForMainFrame)
+                }
+
+                override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                    if (isBlockedMainFrameUrl(url)) {
+                        view.stopLoading()
+                        renderBlockedUrl(url)
+                        return
+                    }
+                    super.onPageStarted(view, url, favicon)
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
@@ -175,6 +221,13 @@ class MainActivity : ComponentActivity() {
         } ?: false
         if (restored) {
             Log.d(LOG_TAG, "Restored WebView state after configuration change")
+            mainHandler.post {
+                val restoredUrl = webView.url.orEmpty()
+                if (isBlockedMainFrameUrl(restoredUrl)) {
+                    webView.stopLoading()
+                    renderBlockedUrl(restoredUrl)
+                }
+            }
             return
         }
 
@@ -208,11 +261,10 @@ class MainActivity : ComponentActivity() {
                   <div style="font-size:22px;letter-spacing:1px">HERMES CONNECTION HUB</div>
                   <a href="hermes://menu" style="text-decoration:none;color:#ffe6cb;background:#0d1d18;border:1px solid #21362d;padding:8px 12px">☰</a>
                 </div>
-                <div style="font-size:13px;color:#89917e;margin-bottom:18px">Choose how you want to connect</div>
-                <a href="hermes://discover" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Same Wi-Fi (Auto Discover)</a>
-                <a href="hermes://manual" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">VPS / Cloud (Enter URL)</a>
+                <div style="font-size:13px;color:#89917e;margin-bottom:18px">Choose a trusted Tailscale dashboard endpoint</div>
+                <a href="hermes://manual" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Tailscale Endpoint (Enter URL)</a>
                 <a href="hermes://saved" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Use Saved Endpoint</a>
-                <a href="hermes://script" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Show VPS Setup Script</a>
+                <a href="hermes://script" style="display:block;text-decoration:none;background:#0d1d18;color:#ffe6cb;padding:16px;border:1px solid #21362d;margin-bottom:10px">Show Tailscale Setup Notes</a>
               </div>
             </body></html>
         """.trimIndent()
@@ -229,33 +281,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun bootstrapDashboardConnection() {
-        renderStatusPage("Scanning local network for Hermes dashboard...", attemptedBases.toList())
-        startupExecutor.execute {
-            Log.d(LOG_TAG, "bootstrap: start")
-            val lastBase = getSavedDashboardBase()
-            if (!lastBase.isNullOrBlank() && isHermesDashboardBase(lastBase)) {
-                Log.d(LOG_TAG, "bootstrap: using last base $lastBase")
-                loadDashboardBase(lastBase, persist = false)
-                return@execute
-            }
-
-            val discovered = discoverHermesDashboardBases()
-            val selected = discovered.firstOrNull()
-
-            if (selected != null) {
-                Log.d(LOG_TAG, "bootstrap: using discovered base $selected")
-                loadDashboardBase(selected, persist = true)
-                return@execute
-            }
-
-            Log.w(LOG_TAG, "bootstrap: discovery failed, showing status page")
-            renderStatusPage("Could not find Hermes dashboard automatically.", attemptedBases.toList())
-            renderConnectionHome()
-        }
+        renderStatusPage("Auto-discovery is disabled in the hardened Tailscale build. Enter a trusted .ts.net or 100.64.0.0/10 endpoint manually.", attemptedBases.toList())
+        renderConnectionHome()
     }
 
     private fun loadDashboardBase(base: String, persist: Boolean) {
-        val normalizedBase = base.removeSuffix("/")
+        val normalizedBase = EndpointPolicy.normalizeDashboardBase(base)
+        if (!EndpointPolicy.isAllowedDashboardBase(normalizedBase)) {
+            renderStatusPage(
+                "Blocked endpoint. This hardened build only allows Tailscale MagicDNS (*.ts.net) or Tailscale IPv4 (100.64.0.0/10) dashboard URLs.",
+                listOf(normalizedBase.ifBlank { base }),
+            )
+            renderConnectionHome()
+            return
+        }
         if (persist) {
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
@@ -392,7 +431,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isHermesDashboardBase(baseUrl: String): Boolean {
-        val clean = baseUrl.removeSuffix("/")
+        val clean = EndpointPolicy.normalizeDashboardBase(baseUrl)
+        if (!EndpointPolicy.isAllowedDashboardBase(clean)) return false
         val statusUrl = "$clean/api/status"
         return try {
             Log.d(LOG_TAG, "probe $statusUrl")
@@ -415,12 +455,13 @@ class MainActivity : ComponentActivity() {
         val attemptedHtml = if (attempted.isEmpty()) {
             "<li>No endpoints attempted yet.</li>"
         } else {
-            attempted.joinToString("") { "<li>${it}/api/status</li>" }
+            attempted.joinToString("") { "<li>${htmlEscape(it)}/api/status</li>" }
         }
+        val safeMessage = htmlEscape(message)
         val html = """
             <html><body style="background:#041c1c;color:#ffe6cb;font-family:monospace;padding:24px;line-height:1.45">
             <h3 style="margin:0 0 10px 0">Hermes Mobile Client</h3>
-            <p style="margin:0 0 10px 0">$message</p>
+            <p style="margin:0 0 10px 0">$safeMessage</p>
             <p style="margin:0 0 6px 0">Attempted endpoints:</p>
             <ul style="margin:0 0 12px 0;padding-left:20px">$attemptedHtml</ul>
             <p style="margin:0">Ensure Hermes dashboard is reachable on port 9119 from this phone network, then relaunch app.</p>
@@ -432,7 +473,7 @@ class MainActivity : ComponentActivity() {
     private fun promptForManualEndpoint() {
         mainHandler.post {
             val input = EditText(this).apply {
-                hint = "http://<host>:9119"
+                hint = "http://host.tailnet.ts.net:9119"
                 setText("http://")
                 setTextColor(Color.parseColor("#ffe6cb"))
                 setHintTextColor(Color.parseColor("#89917e"))
@@ -445,13 +486,13 @@ class MainActivity : ComponentActivity() {
                 setPadding(36, 28, 36, 20)
             }
             val title = TextView(this).apply {
-                text = "VPS / CLOUD ENDPOINT"
+                text = "TAILSCALE ENDPOINT"
                 setTextColor(Color.parseColor("#ffe6cb"))
                 textSize = 16f
                 setPadding(0, 0, 0, 10)
             }
             val help = TextView(this).apply {
-                text = "Enter dashboard base URL (example: http://203.0.113.10:9119)"
+                text = "Enter a Tailscale dashboard URL (example: http://g4-dev.example.ts.net:9119 or http://100.x.y.z:9119)"
                 setTextColor(Color.parseColor("#89917e"))
                 textSize = 12f
                 setPadding(0, 0, 0, 14)
@@ -466,7 +507,7 @@ class MainActivity : ComponentActivity() {
                 .setPositiveButton("Connect") { _, _ ->
                     hideKeyboard(input)
                     val raw = input.text?.toString()?.trim().orEmpty()
-                    val base = normalizeDashboardBase(raw)
+                    val base = EndpointPolicy.normalizeDashboardBase(raw)
                     if (base.isNotBlank()) {
                         attemptedBases += base
                         loadDashboardBase(base, persist = true)
@@ -486,59 +527,20 @@ class MainActivity : ComponentActivity() {
         input.clearFocus()
     }
 
-    private fun normalizeDashboardBase(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.isBlank()) return ""
-        val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            trimmed
-        } else {
-            "http://$trimmed"
-        }
-        return withScheme
-            .removeSuffix("/")
-            .removeSuffix("/chat")
-            .removeSuffix("/")
-    }
 
     private fun showVpsScriptDialog() {
         val script = """
-            # Run on VPS after SSH
-            cat > setup-vps-dashboard.sh <<'EOF'
-            #!/usr/bin/env bash
-            set -euo pipefail
-            SERVICE_NAME="hermes-dashboard.service"
-            SERVICE_PATH="/etc/systemd/system/${'$'}{SERVICE_NAME}"
-            DASHBOARD_PORT=9119
-            DASHBOARD_HOST=0.0.0.0
-            RUN_USER="${'$'}USER"
-            RUN_HOME="$(eval echo "~${'$'}{RUN_USER}")"
-            WORKDIR="${'$'}{RUN_HOME}"
-            if ! command -v hermes >/dev/null 2>&1; then echo "hermes not found"; exit 1; fi
-            sudo tee "${'$'}{SERVICE_PATH}" >/dev/null <<EOT
-            [Unit]
-            Description=Hermes Dashboard
-            After=network-online.target
-            Wants=network-online.target
-            [Service]
-            Type=simple
-            User=${'$'}{RUN_USER}
-            WorkingDirectory=${'$'}{WORKDIR}
-            Environment=HOME=${'$'}{RUN_HOME}
-            Environment=HERMES_DASHBOARD_TUI=1
-            ExecStart=$(command -v hermes) dashboard --host ${'$'}{DASHBOARD_HOST} --port ${'$'}{DASHBOARD_PORT} --no-open --insecure --tui
-            Restart=on-failure
-            RestartSec=3
-            [Install]
-            WantedBy=multi-user.target
-            EOT
-            sudo systemctl daemon-reload
-            sudo systemctl enable "${'$'}{SERVICE_NAME}" >/dev/null
-            sudo systemctl restart "${'$'}{SERVICE_NAME}"
-            if command -v ufw >/dev/null 2>&1; then sudo ufw allow 9119/tcp >/dev/null 2>&1 || true; fi
-            echo "Mobile URL: http://$(curl -fsS https://api.ipify.org):9119"
-            EOF
-            chmod +x setup-vps-dashboard.sh
-            ./setup-vps-dashboard.sh
+            # Hardened Tailscale-only Hermes dashboard setup notes
+            # 1. Install and authenticate Tailscale on this host.
+            # 2. Find the host's Tailscale IP:
+            tailscale ip -4
+            # 3. Start Hermes dashboard bound to that Tailscale IP only:
+            hermes dashboard --host <tailscale-ip> --port 9119 --no-open --insecure --tui
+            # 4. Do NOT open public cloud/security-group/router access to TCP 9119.
+            # 5. In Tailscale ACLs, allow only your approved phone/user/device to reach :9119.
+            # Example mobile endpoint:
+            #   http://host.tailnet.ts.net:9119
+            #   http://100.x.y.z:9119
         """.trimIndent()
 
         val scroll = ScrollView(this).apply {
@@ -553,12 +555,12 @@ class MainActivity : ComponentActivity() {
         scroll.addView(text)
 
         AlertDialog.Builder(this)
-            .setTitle("VPS Setup Script")
+            .setTitle("Tailscale Setup Notes")
             .setView(scroll)
             .setPositiveButton("Copy") { _, _ ->
                 val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cb.setPrimaryClip(ClipData.newPlainText("vps_setup_script", script))
-                renderStatusPage("Script copied to clipboard. Paste it in VPS SSH shell.", emptyList())
+                cb.setPrimaryClip(ClipData.newPlainText("tailscale_setup_notes", script))
+                renderStatusPage("Tailscale setup notes copied. Use only trusted Tailnet endpoints; never public :9119.", emptyList())
                 renderConnectionHome()
             }
             .setNegativeButton("Back") { _, _ -> renderConnectionHome() }
@@ -577,6 +579,38 @@ class MainActivity : ComponentActivity() {
             "textsize" -> showTextSizeDialog()
         }
         return true
+    }
+
+    private fun handleNavigationUrl(url: String, isMainFrame: Boolean): Boolean {
+        if (handleInternalUrl(url)) return true
+        if (isMainFrame && isBlockedMainFrameUrl(url)) {
+            renderBlockedUrl(url)
+            return true
+        }
+        return false
+    }
+
+    private fun isBlockedMainFrameUrl(url: String): Boolean {
+        if (url.isBlank()) return false
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+        return !EndpointPolicy.isAllowedDashboardBase(url)
+    }
+
+    private fun renderBlockedUrl(url: String) {
+        renderStatusPage(
+            "Blocked navigation. This hardened build only allows Tailscale MagicDNS (*.ts.net) or Tailscale IPv4 (100.64.0.0/10) dashboard URLs.",
+            listOf(url),
+        )
+        renderConnectionHome()
+    }
+
+    private fun htmlEscape(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
     }
 
     private fun showHamburgerMenu() {
