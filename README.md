@@ -11,7 +11,8 @@ This fork is designed around these rules:
 - Do **not** expose Hermes dashboard port `9119` publicly.
 - Do **not** use public VPS IPs, public DNS names, or arbitrary domains as mobile endpoints.
 - Use explicit Tailscale MagicDNS names ending in `.ts.net` or Tailscale IPv4 addresses in `100.64.0.0/10`.
-- Disable LAN auto-discovery; manually choose trusted Tailnet endpoints.
+- Disable same-Wi-Fi/LAN auto-discovery.
+- Allow Tailnet-only auto-discovery from configured MagicDNS hostnames/ports and local Tailscale IPv4 candidates.
 - Use Tailscale ACLs so only approved phone/user/device identities can reach Hermes dashboard hosts.
 
 ## Hardening changes in this fork
@@ -27,6 +28,22 @@ This fork is designed around these rules:
 - Replaced public VPS setup guidance with Tailscale-only setup notes.
 - Rewrote `scripts/setup-vps-dashboard.sh` to bind Hermes dashboard to the host's Tailscale IP and avoid public firewall exposure.
 - Removed stale prebuilt APK artifacts from the fork. Build and sign a fresh APK from this source before installation.
+
+## Tailnet auto-discovery
+
+This fork now includes Tailnet-only auto-discovery. It does **not** perform broad Wi-Fi/LAN probing or mDNS discovery. Instead, it builds a candidate list from trusted Tailnet inputs, probes `/api/status`, and only offers endpoints that still pass the same `EndpointPolicy` allowlist.
+
+Discovery inputs:
+
+- Tailnet suffix, for example `<tailnet>.ts.net`.
+- Hermes hostnames, for example `devil,g4-dev,dev01`.
+- Dashboard ports, for example `9119,9120,9121,9122,9123` for multiple deployments per host.
+- Optional explicit Tailscale IPv4 addresses, if you want to enter `100.x.y.z` endpoints directly.
+- Previously saved endpoint, if it is still a valid Tailnet endpoint.
+
+The app does not infer a `/24` from the phone and does not sweep CGNAT/LAN ranges. Every probed candidate comes from the saved endpoint, configured MagicDNS hostnames, or explicit `100.64.0.0/10` IPs you entered.
+
+In the app, tap **Configure Tailnet Discovery**, enter the suffix/hosts/ports once, then tap **Tailnet Auto Discover**. Multiple verified dashboards are shown in a picker.
 
 ## Recommended Hermes dashboard setup
 
@@ -116,7 +133,7 @@ For a release APK, configure your own private signing key and build/sign from th
 
 ## Current limitations
 
-- The app currently stores one saved endpoint. A future iteration should add a named endpoint picker for deployments like `devil`, `g4-Dev`, etc.
+- The app stores a saved endpoint and Tailnet discovery settings. A future iteration could add friendly deployment names/icons for endpoints like `devil`, `g4-Dev`, etc.
 - The app still uses HTTP inside the Tailnet. Tailscale encrypts transport, but app-layer auth/TLS would be stronger if Hermes dashboard supports it.
 - This fork assumes Tailscale network identity and ACLs are the primary access control. Treat dashboard access as trusted-tailnet-only unless Hermes dashboard auth is enabled.
 
