@@ -1,11 +1,14 @@
 package dev.hermes.mobile
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +22,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
@@ -53,6 +57,7 @@ private const val PREF_DISCOVERY_IPV4 = "discovery_ipv4"
 private const val PREF_TEXT_ZOOM = "text_zoom"
 private const val STATE_WEBVIEW = "state_webview"
 private const val DEFAULT_TEXT_ZOOM = 90
+private const val REQUEST_RECORD_AUDIO = 2401
 private const val DEFAULT_DISCOVERY_HOSTS = "devil,dev01,g4-dev,g4-dt-069,g4dev,g4,hermes,dev"
 private const val DEFAULT_DISCOVERY_PORTS = "9119,9120,9121,9122,9123"
 private const val DEFAULT_DISCOVERY_IPV4 = ""
@@ -170,6 +175,7 @@ class MainActivity : ComponentActivity() {
     private val startupExecutor = Executors.newSingleThreadExecutor()
     private val attemptedBases = CopyOnWriteArrayList<String>()
     private var showingConnectionHub = false
+    private var pendingAudioPermissionRequest: PermissionRequest? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -210,6 +216,15 @@ class MainActivity : ComponentActivity() {
             webChromeClient = object : WebChromeClient() {
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                     return true
+                }
+
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    mainHandler.post { handleWebPermissionRequest(request) }
+                }
+
+                override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                    if (pendingAudioPermissionRequest == request) pendingAudioPermissionRequest = null
+                    super.onPermissionRequestCanceled(request)
                 }
             }
 
@@ -312,6 +327,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        pendingAudioPermissionRequest?.deny()
+        pendingAudioPermissionRequest = null
         startupExecutor.shutdownNow()
         webView.destroy()
         super.onDestroy()
@@ -322,6 +339,45 @@ class MainActivity : ComponentActivity() {
         val webState = Bundle()
         webView.saveState(webState)
         outState.putBundle(STATE_WEBVIEW, webState)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_RECORD_AUDIO) return
+        val request = pendingAudioPermissionRequest ?: return
+        pendingAudioPermissionRequest = null
+        val requested = request.resources?.toSet().orEmpty()
+        val audioOnly = requested.isNotEmpty() && requested.all { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+        if (audioOnly && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && isAllowedWebPermissionOrigin(request.origin)) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        } else {
+            request.deny()
+        }
+    }
+
+    private fun handleWebPermissionRequest(request: PermissionRequest) {
+        val requested = request.resources?.toSet().orEmpty()
+        val audioOnly = requested.isNotEmpty() && requested.all { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+        if (!audioOnly || !isAllowedWebPermissionOrigin(request.origin)) {
+            request.deny()
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            return
+        }
+        pendingAudioPermissionRequest?.deny()
+        pendingAudioPermissionRequest = request
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+    }
+
+    private fun isAllowedWebPermissionOrigin(origin: Uri?): Boolean {
+        val value = origin?.toString().orEmpty()
+        return EndpointPolicy.isAllowedDashboardBase(value)
     }
 
     private fun renderConnectionHome() {
