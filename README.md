@@ -17,8 +17,9 @@ This fork is designed around these rules:
 
 ## Hardening changes in this fork
 
-- Removed `RECORD_AUDIO` permission.
-- Disabled Android app backup with `android:allowBackup="false"`.
+- Enabled `RECORD_AUDIO` so Tailnet dashboards can experiment with browser/WebRTC microphone features.
+- WebView microphone permission requests are granted only for allowed Tailscale dashboard origins and only for audio capture.
+- Enabled Android app backup with `android:allowBackup="true"` per user preference; this can back up app/WebView state depending on Android backup behavior.
 - Changed WebView mixed content policy to `MIXED_CONTENT_NEVER_ALLOW`.
 - Added `EndpointPolicy` allowlist logic:
   - Allows `*.ts.net` MagicDNS hostnames.
