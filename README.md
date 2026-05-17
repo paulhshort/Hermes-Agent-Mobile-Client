@@ -1,168 +1,67 @@
-# Hermes Agent Mobile Client (for Android, iOS - WIP)
+# Hermes Agent Mobile Client — Hardened Tailscale Fork
 
+This fork customizes the Android Hermes mobile client for a **trusted Tailscale-only** deployment model.
 
-![Hermes Agent Mobile demo](demo/hermes-agent-mobile-demo.gif)
+It is a thin Android WebView client for a running Hermes dashboard. The app is intentionally constrained so it can be used to access selected Hermes Agent deployments on your Tailnet without exposing dashboard control surfaces to the public internet.
 
-[Download signed Android APK](https://github.com/areu01or00/Hermes-Agent-Mobile-Client/raw/main/apk/hermes-agent-mobile-client-release.apk)
+## Security posture
 
-This folder is an open-source snapshot of the current project state: a thin
-Android WebView client that loads a running Hermes dashboard.
+This fork is designed around these rules:
 
-It is an honest Android-only port attempt, not an upstream Hermes PR.
-iOS is not implemented in this repo.
+- Do **not** expose Hermes dashboard port `9119` publicly.
+- Do **not** use public VPS IPs, public DNS names, or arbitrary domains as mobile endpoints.
+- Use explicit Tailscale MagicDNS names ending in `.ts.net` or Tailscale IPv4 addresses in `100.64.0.0/10`.
+- Disable LAN auto-discovery; manually choose trusted Tailnet endpoints.
+- Use Tailscale ACLs so only approved phone/user/device identities can reach Hermes dashboard hosts.
 
-## What this is
+## Hardening changes in this fork
 
-- Android app that discovers a reachable Hermes dashboard endpoint on network
-  and opens it in WebView.
-- Uses Hermes dashboard as the source of truth (sessions/chat/jobs/skills all
-  come from Hermes server).
-- Owns Android soft-keyboard adaptation in the APK so a stock Hermes dashboard
-  can be used without patching each user's PC/VPS checkout.
-- Includes a signed APK for quick sideload testing.
+- Removed `RECORD_AUDIO` permission.
+- Disabled Android app backup with `android:allowBackup="false"`.
+- Changed WebView mixed content policy to `MIXED_CONTENT_NEVER_ALLOW`.
+- Added `EndpointPolicy` allowlist logic:
+  - Allows `*.ts.net` MagicDNS hostnames.
+  - Allows Tailscale IPv4 range `100.64.0.0/10`.
+  - Rejects public IPs, LAN IPs, arbitrary domains, and URLs with userinfo.
+- Disabled same-Wi-Fi/LAN auto-discovery in the UI flow.
+- Replaced public VPS setup guidance with Tailscale-only setup notes.
+- Rewrote `scripts/setup-vps-dashboard.sh` to bind Hermes dashboard to the host's Tailscale IP and avoid public firewall exposure.
+- Removed stale prebuilt APK artifacts from the fork. Build and sign a fresh APK from this source before installation.
 
-## What this is not
+## Recommended Hermes dashboard setup
 
-- Not a replacement for Hermes server.
-- Not a full native Android rewrite of Hermes UI logic.
-- Not production-hardened distribution.
-
-## Repo layout
-
-- `android/` - Android Studio / Gradle project
-- `apk/hermes-agent-mobile-client-release.apk` - signed APK artifact
-- `apk/hermes-agent-mobile-client-debug.apk` - debug APK artifact
-- `demo/hermes-agent-mobile-demo.gif` - README-compatible inline demo
-- `demo/hermes-agent-mobile-demo.mp4` - trimmed app demo recording
-- `scripts/run-emulator.sh` - helper script for emulator startup
-- `scripts/setup-vps-dashboard.sh` - one-shot VPS dashboard setup
-
-## Download APK
-
-Direct APK download:
-
-`https://github.com/areu01or00/Hermes-Agent-Mobile-Client/raw/main/apk/hermes-agent-mobile-client-release.apk`
-
-Android may ask you to allow "Install unknown apps" for the browser or file
-manager used to open the APK.
-
-## Requirements
-
-1. A working Hermes setup on PC or VPS.
-2. Hermes dashboard reachable from your Android device.
-3. Hermes dashboard started with embedded chat:
-   `hermes dashboard --host 0.0.0.0 --port 9119 --no-open --insecure --tui`
-4. Open firewall/security-group port for dashboard (example: `9119`).
-5. Android device or emulator with internet access to that host.
-6. For best auto-discovery, phone and Hermes host should be on the same LAN.
-
-## One-shot VPS setup
-
-After cloning this repo on your VPS:
+On each Hermes host, install and authenticate Tailscale, then find the Tailscale IP:
 
 ```bash
-cd Hermes-Agent-Mobile-Client/scripts
-chmod +x setup-vps-dashboard.sh
-./setup-vps-dashboard.sh
+tailscale ip -4
 ```
 
-It writes/starts a `systemd` service, checks health, opens `ufw` port `9119`
-if available, and prints the mobile URL.
-
-## Server-side check
-
-Open in browser (replace host as needed):
-
-`http://<your-host>:9119`
-
-For chat tab support, dashboard must expose embedded chat flag (served HTML
-includes `window.__HERMES_DASHBOARD_EMBEDDED_CHAT__=true` when `--tui` is on).
-
-## Use the included APK
-
-Install:
+Start Hermes dashboard bound to that Tailscale IP:
 
 ```bash
-adb install -r apk/hermes-agent-mobile-client-release.apk
+hermes dashboard --host <tailscale-ip> --port 9119 --no-open --insecure --tui
 ```
 
-Launch app:
+Mobile endpoint examples accepted by this app:
 
-- Same Wi-Fi auto-discovery probes local Hermes dashboard candidates.
-- VPS / Cloud accepts a manual dashboard base URL and opens `/chat` directly.
-- Use Saved Endpoint reopens the last manually connected dashboard base URL.
-- If dashboard navigation fails, the app shows the WebView network/HTTP error
-  instead of leaving a blank screen.
-- The app wraps WebView with an Android input bridge so soft-keyboard typing,
-  Backspace, Enter, Delete, and arrow-key style operations are routed into the
-  Hermes xterm chat page.
-
-For VPS-only setups outside local LAN, you should still make the VPS dashboard
-reachable from the phone network (`http://<vps-ip>:9119`) and connect once from
-the same route; app will persist the last successful base URL.
-
-## Troubleshooting
-
-If login times out after entering a correct URL, verify the server first. A
-timeout means the Android WebView is trying to reach the dashboard but the host
-or port is not answering from the phone network.
-
-From a PC:
-
-```bash
-curl -fsS http://<your-host>:9119/api/status
-curl -fsS http://<your-host>:9119/chat
+```text
+http://devil.<tailnet>.ts.net:9119
+http://g4-dev.<tailnet>.ts.net:9119
+http://100.x.y.z:9119
 ```
 
-On a VPS:
+Avoid:
 
-```bash
-sudo ss -ltnp | grep 9119
-sudo systemctl status hermes-dashboard.service
-sudo journalctl -u hermes-dashboard.service -n 100 --no-pager
+```text
+http://public-vps-ip:9119
+http://192.168.x.y:9119
+http://10.x.y.z:9119
+https://random-domain.example
 ```
 
-For AWS Lightsail, also confirm the instance firewall has inbound TCP `9119`
-open and the instance is reachable on SSH. If both SSH and `9119` time out while
-Lightsail says ports are open, rebooting the instance can restore networking.
+## Persistent Linux host setup
 
-## Instructions for agents
-
-If a user gives you this repo and says "make it work for me", treat the Android
-app as a client and verify the Hermes dashboard first.
-
-Recommended order:
-
-1. Ask where Hermes Agent should run: the user's PC on the same Wi-Fi, a LAN
-   machine, or a VPS/cloud host.
-2. Verify Hermes exists on that host:
-
-```bash
-command -v hermes
-hermes --version
-```
-
-3. Start the dashboard with embedded TUI support:
-
-```bash
-hermes dashboard --host 0.0.0.0 --port 9119 --no-open --insecure --tui
-```
-
-4. From another machine on the same route as the phone, verify:
-
-```bash
-curl -fsS http://<host>:9119/api/status
-curl -fsS http://<host>:9119/chat
-```
-
-5. For VPS/cloud hosts, confirm the service is listening on all interfaces and
-   the firewall/security group allows inbound TCP `9119`:
-
-```bash
-sudo ss -ltnp | grep 9119
-```
-
-6. If the user wants a persistent VPS setup, use the included helper:
+For Linux/VPS hosts that already have Hermes and Tailscale configured:
 
 ```bash
 cd scripts
@@ -170,57 +69,61 @@ chmod +x setup-vps-dashboard.sh
 ./setup-vps-dashboard.sh
 ```
 
-7. Only debug the APK after `/api/status` and `/chat` are reachable from the
-   phone network. Most connection failures are wrong URL, firewall, dashboard
-   not running, dashboard bound to localhost, or missing `--tui`.
-8. Do not make hidden edits to the user's Hermes Agent checkout as a default
-   fix. This client is intended to work with stock Hermes dashboard. If a
-   Hermes-side change is genuinely required, document it as an upstream
-   compatibility issue.
-9. Known mobile caveat: Android soft-keyboard input is adapted in the APK.
-   Terminal scroll inside WebView may still vary by device/WebView version.
+The script:
 
-## Known gaps
+- detects the host's Tailscale IPv4 address,
+- refuses to bind to non-Tailscale addresses,
+- creates a systemd service for Hermes dashboard,
+- binds to the Tailscale IP only,
+- allows UFW only from `100.64.0.0/10` if UFW exists,
+- prints a Tailnet endpoint for the phone.
 
-- Terminal scroll inside the embedded Hermes TUI may still vary by device and
-  WebView version.
-- The Hermes TUI startup banner/sigil may appear in landscape but not portrait.
-  This appears to be upstream dashboard/TUI responsive behavior when terminal
-  columns are narrow, not a launcher icon or APK packaging issue.
-- Hermes dashboard plugin pages are inherited from the upstream dashboard, but
-  this Android client has not validated every plugin page yet.
-- Under the dashboard `Plugins` section, `Kanban` and `Example` are currently
-  unvalidated/unknown in this mobile client. They may appear because the stock
-  Hermes dashboard exposes them, but they should not be treated as confirmed
-  mobile-supported features yet.
+Still verify cloud/security-group/router firewalls do **not** expose `9119` publicly.
 
-## Build APK
+## Tailscale ACL guidance
+
+Prefer tagging Hermes hosts and allowing only your phone/user/device to reach port `9119`.
+
+Conceptual ACL pattern:
+
+```json
+{
+  "action": "accept",
+  "src": ["user:you@example.com"],
+  "dst": ["tag:hermes:9119"]
+}
+```
+
+Use your real Tailnet users/tags. Do not allow the whole internet or broad untrusted groups to dashboard ports.
+
+## Build
+
+Requires Android Studio or a working Android SDK/JDK 17 environment.
 
 ```bash
 cd android
-JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew assembleDebug
+./gradlew test
+./gradlew assembleDebug
 ```
 
 Output:
 
-`android/app/build/outputs/apk/debug/app-debug.apk`
+```text
+android/app/build/outputs/apk/debug/app-debug.apk
+```
 
-The published APK in `apk/hermes-agent-mobile-client-release.apk` is signed
-with a private release keystore. Keep that keystore private; future update APKs
-must use the same key or Android will reject them as updates.
+For a release APK, configure your own private signing key and build/sign from this fork. Do not reuse or trust old prebuilt APK artifacts from upstream for the hardened fork.
 
-## Notes for contributors
+## Current limitations
 
-- This repo currently supports Android only.
-- If you want iOS support, port the same architecture (thin client + Hermes
-  dashboard backend) on iOS.
-- Do not require users to patch their Hermes Agent install for mobile keyboard
-  behavior. Mobile input fixes belong in the Android client unless they are
-  submitted as proper upstream Hermes dashboard changes.
-- Terminal scroll on Android WebView is still an active compatibility area. The
-  current client attempts wheel and Shift+Arrow event bridging, but contributors
-  should verify behavior on real devices before treating it as complete.
-- Portrait mode may not show the full Hermes TUI startup banner/sigil because
-  the upstream terminal UI changes output at narrow widths.
-- Plugin pages such as `Kanban` and `Example` need explicit mobile validation
-  before they are documented as working.
+- The app currently stores one saved endpoint. A future iteration should add a named endpoint picker for deployments like `devil`, `g4-Dev`, etc.
+- The app still uses HTTP inside the Tailnet. Tailscale encrypts transport, but app-layer auth/TLS would be stronger if Hermes dashboard supports it.
+- This fork assumes Tailscale network identity and ACLs are the primary access control. Treat dashboard access as trusted-tailnet-only unless Hermes dashboard auth is enabled.
+
+## Original upstream
+
+Forked from:
+
+```text
+https://github.com/areu01or00/Hermes-Agent-Mobile-Client
+```
